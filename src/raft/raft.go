@@ -20,12 +20,14 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.824/labgob"
+	"6.824/labgob"
 	"6.824/labrpc"
 	"github.com/google/uuid"
 )
@@ -117,13 +119,16 @@ func (rf *Raft) GetState() (int, bool) {
 //
 func (rf *Raft) persist() {
 	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	currentTerm := rf.currentTerm
+	votedFor := rf.votedFor
+	log := rf.log
+	e.Encode(currentTerm)
+	e.Encode(votedFor)
+	e.Encode(log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -134,18 +139,24 @@ func (rf *Raft) readPersist(data []byte) {
 		return
 	}
 	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []LogEntry
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&log) != nil {
+		DPrintf("S%d - readPersist error", rf.me)
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+	}
+}
+
+func (rf *Raft) restorePersist() {
+	rf.readPersist(rf.persister.ReadRaftState())
 }
 
 //
@@ -258,6 +269,7 @@ func (rf *Raft) processExisting(args *AppendEntriesArgs, requestId uuid.UUID) {
 	if j < len(args.Entries) {
 		DPrintf("S%d - %v - appending new entries", rf.me, requestId)
 		rf.log = append(rf.log, args.Entries[j:]...)
+		rf.persist()
 		DPrintf("S%d - %v - after append:%v", rf.me, requestId, rf.log)
 	}
 }
@@ -340,6 +352,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 		rf.currentTerm = args.Term
+		rf.persist()
 		rf.resetElectionTimer()
 	}
 	rf.mu.Unlock()
@@ -430,6 +443,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		index = len(rf.log) - 1
 		term = rf.currentTerm
 		DPrintf("S%d - appended new command index-%v, term-%v, isLeader-%v", rf.me, index, term, isLeader)
+		rf.persist()
 		rf.mu.Unlock()
 		return index, term, isLeader
 	}
@@ -491,6 +505,7 @@ func (rf *Raft) startElection() {
 	// send RequestVote RPC to all other servers
 	rf.currentTerm += 1
 	rf.votedFor = rf.me
+	rf.persist()
 	rf.resetElectionTimer()
 	rf.votesReceived = 1
 	for i := 0; i < len(rf.peers); i++ {
@@ -664,6 +679,7 @@ func (rf *Raft) adoptHigerTerm(newTerm int) {
 	rf.state = Follower
 	rf.currentTerm = newTerm
 	rf.votedFor = -1
+	rf.persist()
 }
 
 //
@@ -690,7 +706,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.log = []LogEntry{}
-	rf.log = append(rf.log, LogEntry{Term: rf.currentTerm})
+	rf.restorePersist()
+	if len(rf.log) == 0 {
+		rf.log = append(rf.log, LogEntry{Term: rf.currentTerm})
+	}
 
 	rf.commitIndex = 0
 	rf.lastApplied = 0
